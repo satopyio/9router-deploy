@@ -136,7 +136,7 @@ export async function syncFull(adapter) {
     await flushQueue(client);
 
     const tablesRes = adapter.all(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '_%' AND name != 'sqlite_sequence'"
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name != 'sqlite_sequence'"
     );
 
     for (const { name } of tablesRes) {

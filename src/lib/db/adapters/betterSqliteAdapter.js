@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { PRAGMA_SQL } from "../schema.js";
 import {
-  syncWrite, syncExec, isTursoConfigured,
+  syncWrite, syncExec, syncFull, isTursoConfigured,
   startPeriodicSync, startFlushOnShutdown
 } from "../sync/tursoSync.js";
 
@@ -45,8 +45,12 @@ export function createBetterSqliteAdapter(filePath) {
   const hasTurso = isTursoConfigured();
 
   if (hasTurso) {
-    startFlushOnShutdown(createTursoSyncAdapter(db));
-    startPeriodicSync(createTursoSyncAdapter(db));
+    const syncAdapter = createTursoSyncAdapter(db);
+    startFlushOnShutdown(syncAdapter);
+    startPeriodicSync(syncAdapter);
+    setTimeout(() => {
+      syncFull(syncAdapter).catch(() => {});
+    }, 10000);
   }
 
   function createTursoSyncAdapter(rawDb) {
