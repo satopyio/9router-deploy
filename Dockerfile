@@ -25,6 +25,7 @@ ENV PORT=20128
 ENV HOSTNAME=0.0.0.0
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV DATA_DIR=/app/data
+ENV HEADROOM_URL=http://127.0.0.1:8787
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/static ./.next/static
@@ -44,10 +45,22 @@ RUN mkdir -p /app/data && chown -R node:node /app && \
   mkdir -p /app/data-home && chown node:node /app/data-home && \
   ln -sf /app/data-home /root/.9router 2>/dev/null || true
 
+# Install Python + Headroom proxy for token compression
+RUN apk --no-cache add python3 py3-pip && \
+    python3 -m pip install --no-cache-dir --break-system-packages "headroom-ai[proxy]"
+
 # Fix permissions at runtime (handles mounted volumes)
 RUN apk --no-cache upgrade && apk --no-cache add su-exec && \
-  printf '#!/bin/sh\nchown -R node:node /app/data /app/data-home 2>/dev/null\nexec su-exec node "$@"\n' > /entrypoint.sh && \
-  chmod +x /entrypoint.sh
+    printf '#!/bin/sh\n\
+chown -R node:node /app/data /app/data-home 2>/dev/null\n\
+\n\
+# Start Headroom proxy in background (port 8787)\n\
+su-exec node headroom proxy --port 8787 --host 127.0.0.1 &\n\
+sleep 3\n\
+\n\
+# Start 9router\n\
+exec su-exec node "$@"\n' > /entrypoint.sh && \
+    chmod +x /entrypoint.sh
 
 EXPOSE 20128
 

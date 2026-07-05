@@ -31,5 +31,7 @@ services:
         value: libsql://9router-satopyio.aws-eu-west-1.turso.io
       - key: TURSO_DB_TOKEN
         value: eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODMyMTM0MzEsImlkIjoiMDE5ZjJmY2MtOGYwMS03ZDJhLWE2NWYtZmFmMmQ3YjljM2MxIiwia2lkIjoiR0l4TGJKdDU5akFGTVN0b3U0ZDJTM0xGNEZ1YXNuemt3cUpZRFlLWUh4WSIsInJpZCI6IjNjMzFhOWMwLTkxODMtNGU3MS1hYmJhLTM3YzVjNTQ4MDUyNiJ9.l_M9JuDN9rVtn_uBpCKl2GVdKj0ilqCQsc1OSmkm0I8wOOofNwoc09SXq7K8GEvTncq-p5PsVl4CCxVxOlA8Dw
+      - key: HEADROOM_URL
+        value: http://127.0.0.1:8787
     healthCheckPath: /
     numInstances: 1
