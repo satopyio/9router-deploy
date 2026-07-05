@@ -1,6 +1,9 @@
 import Database from "better-sqlite3";
 import { PRAGMA_SQL } from "../schema.js";
-import { syncWrite, syncExec, isTursoConfigured } from "../sync/tursoSync.js";
+import {
+  syncWrite, syncExec, isTursoConfigured,
+  startPeriodicSync, startFlushOnShutdown
+} from "../sync/tursoSync.js";
 
 // Periodic checkpoint to keep WAL file small (avoid huge -wal/-shm growth)
 const CHECKPOINT_INTERVAL_MS = 60 * 1000;
@@ -40,6 +43,22 @@ export function createBetterSqliteAdapter(filePath) {
   process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
 
   const hasTurso = isTursoConfigured();
+
+  if (hasTurso) {
+    startFlushOnShutdown(createTursoSyncAdapter(db));
+    startPeriodicSync(createTursoSyncAdapter(db));
+  }
+
+  function createTursoSyncAdapter(rawDb) {
+    return {
+      driver: "sync-adapter",
+      run(sql, params = []) { return rawDb.prepare(sql).run(params); },
+      get(sql, params = []) { return rawDb.prepare(sql).get(params); },
+      all(sql, params = []) { return rawDb.prepare(sql).all(params); },
+      exec(sql) { return rawDb.exec(sql); },
+      transaction(fn) { return rawDb.transaction(fn)(); },
+    };
+  }
 
   return {
     driver: hasTurso ? "better-sqlite3 + turso" : "better-sqlite3",

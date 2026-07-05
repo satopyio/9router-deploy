@@ -1,12 +1,12 @@
 import { createClient } from "@libsql/client";
-import fs from "node:fs";
-import path from "node:path";
-import { ensureDirs } from "../paths.js";
 
 const TURSO_URL = process.env.TURSO_DB_URL;
 const TURSO_TOKEN = process.env.TURSO_DB_TOKEN;
 
 let _client = null;
+let _writeQueue = [];
+let _flushTimer = null;
+let _fullSyncTimer = null;
 
 function getClient() {
   if (!TURSO_URL || !TURSO_TOKEN) return null;
@@ -20,101 +20,205 @@ export function isTursoConfigured() {
   return !!(TURSO_URL && TURSO_TOKEN);
 }
 
-export async function restoreFromTurso(dataFile) {
+export async function restoreFromTurso(adapter) {
   const client = getClient();
   if (!client) return;
 
   try {
-    const tables = await client.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '_%' AND name != 'sqlite_sequence'");
-    const tableNames = tables.rows.map(r => r.name).filter(Boolean);
+    const tablesRes = await client.execute(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name != 'sqlite_sequence'"
+    );
+    const tableNames = tablesRes.rows.map(r => r.name).filter(Boolean);
 
     if (tableNames.length === 0) {
       console.log("[Turso] remote DB is empty, nothing to restore");
       return;
     }
 
+    let totalRows = 0;
     for (const table of tableNames) {
-      const rows = await client.execute(`SELECT * FROM "${table}"`);
-      if (rows.rows.length > 0) {
-        console.log(`[Turso] restoring ${rows.rows.length} rows into ${table}`);
+      const colsRes = await client.execute(`PRAGMA table_info("${table}")`);
+      const colNames = colsRes.rows.map(c => c.name);
+      if (colNames.length === 0) continue;
+
+      const dataRes = await client.execute(`SELECT * FROM "${table}"`);
+      if (dataRes.rows.length === 0) continue;
+
+      for (const row of dataRes.rows) {
+        const placeholders = colNames.map(() => "?").join(",");
+        const values = colNames.map(c => row[c]);
+        try {
+          adapter.run(
+            `INSERT INTO "${table}"(${colNames.map(c => `"${c}"`).join(",")}) VALUES(${placeholders})`,
+            values
+          );
+          totalRows++;
+        } catch (e) {
+          if (!e.message.includes("UNIQUE constraint")) {
+            console.warn(`[Turso] restore insert failed for ${table}: ${e.message}`);
+          }
+        }
       }
     }
 
-    const totalRows = await client.execute(
-      `SELECT SUM(cnt) AS total FROM (SELECT COUNT(*) AS cnt FROM sqlite_master WHERE type='table' AND name NOT LIKE '_%' AND name != 'sqlite_sequence' UNION ALL SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE '_%' AND name != 'sqlite_sequence')`
-    );
+    console.log(`[Turso] restored ${totalRows} rows across ${tableNames.length} tables`);
 
-    console.log(`[Turso] remote DB has ${tableNames.length} tables`);
+    await syncFull(adapter);
   } catch (e) {
-    console.warn(`[Turso] restore check failed: ${e.message}`);
+    console.warn(`[Turso] restore failed: ${e.message}`);
   }
 }
 
-export async function syncWrite(sql, params = []) {
-  const client = getClient();
-  if (!client) return;
-
+function isWriteSQL(sql) {
   const trimmed = sql.trim().toUpperCase();
-  if (trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA")) return;
-
-  client.execute({ sql, args: params }).catch(e => {
-    if (e.message && !e.message.includes("no such table") && !e.message.includes("UNIQUE constraint")) {
-      console.warn(`[Turso] write sync failed: ${e.message}`);
-    }
-  });
+  if (trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA")) return false;
+  return true;
 }
 
-export async function syncExec(sql) {
+export function syncWrite(sql, params = []) {
+  const client = getClient();
+  if (!client || !isWriteSQL(sql)) return;
+
+  _writeQueue.push({ sql, args: params });
+  scheduleFlush(client);
+}
+
+export function syncExec(sql) {
   const client = getClient();
   if (!client) return;
 
-  const trimmed = sql.trim().toUpperCase();
-  if (trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA") || trimmed.startsWith("SAVEPOINT") || trimmed.startsWith("RELEASE") || trimmed.startsWith("ROLLBACK")) return;
-
   const statements = sql.split(";").filter(s => {
-    const t = s.trim().toUpperCase();
-    return t && !t.startsWith("SELECT") && !t.startsWith("PRAGMA") && !t.startsWith("SAVEPOINT") && !t.startsWith("RELEASE") && !t.startsWith("ROLLBACK");
+    const t = s.trim();
+    return t && isWriteSQL(t);
   });
 
   for (const stmt of statements) {
-    if (stmt.trim()) {
-      client.execute({ sql: stmt.trim() }).catch(e => {
-        if (e.message && !e.message.includes("already exists")) {
-          console.warn(`[Turso] exec sync failed: ${e.message}`);
-        }
-      });
+    const trimmed = stmt.trim();
+    _writeQueue.push({ sql: trimmed, args: [] });
+  }
+  scheduleFlush(client);
+}
+
+function scheduleFlush(client) {
+  if (_flushTimer) return;
+  _flushTimer = setTimeout(() => {
+    _flushTimer = null;
+    flushQueue(client);
+  }, 2000);
+}
+
+async function flushQueue(client) {
+  if (_writeQueue.length === 0) return;
+  const batch = _writeQueue.splice(0, _writeQueue.length);
+
+  try {
+    const requests = [];
+    for (const item of batch) {
+      if (item.sql && item.sql.trim()) {
+        requests.push({ type: "execute", stmt: { sql: item.sql, args: item.args } });
+      }
+    }
+    if (requests.length === 0) return;
+    await client.batch(requests, "write");
+  } catch (e) {
+    _writeQueue.unshift(...batch);
+    if (!e.message?.includes("no such table") && !e.message?.includes("UNIQUE")) {
+      console.warn(`[Turso] batch flush failed (${batch.length} stmts): ${e.message}`);
     }
   }
 }
 
-export function closeTurso() {
+export async function syncFull(adapter) {
+  const client = getClient();
+  if (!client) return;
+
+  try {
+    await flushQueue(client);
+
+    const tablesRes = adapter.all(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '_%' AND name != 'sqlite_sequence'"
+    );
+
+    for (const { name } of tablesRes) {
+      const rows = adapter.all(`SELECT * FROM "${name}"`);
+      if (rows.length === 0) continue;
+
+      await client.execute(`DELETE FROM "${name}"`);
+
+      const colsRes = await client.execute(`PRAGMA table_info("${name}")`);
+      const colNames = colsRes.rows.map(c => c.name);
+      if (colNames.length === 0) continue;
+
+      for (const row of rows) {
+        const placeholders = colNames.map(() => "?").join(",");
+        const values = colNames.map(c => row[c]);
+        try {
+          await client.execute({
+            sql: `INSERT INTO "${name}"(${colNames.map(c => `"${c}"`).join(",")}) VALUES(${placeholders})`,
+            args: values,
+          });
+        } catch (e) {
+          if (!e.message?.includes("UNIQUE")) {
+            console.warn(`[Turso] full-sync insert failed for ${name}: ${e.message}`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn(`[Turso] full-sync error: ${e.message}`);
+  }
+}
+
+export function startPeriodicSync(adapter) {
+  if (!isTursoConfigured()) return;
+
+  if (_fullSyncTimer) clearInterval(_fullSyncTimer);
+  _fullSyncTimer = setInterval(async () => {
+    try {
+      await syncFull(adapter);
+    } catch {}
+  }, 120000);
+
+  if (typeof _fullSyncTimer.unref === "function") _fullSyncTimer.unref();
+}
+
+export function stopPeriodicSync() {
+  if (_fullSyncTimer) {
+    clearInterval(_fullSyncTimer);
+    _fullSyncTimer = null;
+  }
+}
+
+export function startFlushOnShutdown(adapter) {
+  const onShutdown = async () => {
+    console.log("[Turso] flushing writes before shutdown...");
+    const client = getClient();
+    if (client) {
+      await flushQueue(client);
+      await syncFull(adapter);
+    }
+    closeTurso();
+  };
+
+  process.once("beforeExit", onShutdown);
+  process.once("SIGTERM", () => {
+    onShutdown().finally(() => process.exit(0));
+  });
+  process.once("SIGINT", () => {
+    onShutdown().finally(() => process.exit(0));
+  });
+}
+
+function closeTurso() {
+  if (_flushTimer) {
+    clearTimeout(_flushTimer);
+    _flushTimer = null;
+  }
+  stopPeriodicSync();
   if (_client) {
     try { _client.close(); } catch {}
     _client = null;
   }
 }
 
-let syncInterval = null;
-
-export function startPeriodicSync(db) {
-  if (!isTursoConfigured()) return;
-  if (syncInterval) return;
-
-  syncInterval = setInterval(async () => {
-    try {
-      if (!isTursoConfigured()) return;
-      console.log("[Turso] periodic sync tick");
-    } catch (e) {
-      console.warn(`[Turso] periodic sync error: ${e.message}`);
-    }
-  }, 300000);
-
-  if (typeof syncInterval.unref === "function") syncInterval.unref();
-}
-
-export function stopPeriodicSync() {
-  if (syncInterval) {
-    clearInterval(syncInterval);
-    syncInterval = null;
-  }
-}
+export { flushQueue, closeTurso };

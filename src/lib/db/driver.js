@@ -5,6 +5,7 @@ import { restoreFromTurso, isTursoConfigured } from "./sync/tursoSync.js";
 // Use global to survive Next.js dev hot-reload (module state resets on reload)
 if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false };
 const state = global._dbAdapter;
+const needsTursoRestore = isTursoConfigured() && !fs.existsSync(DATA_FILE);
 
 async function tryBunSqlite() {
   // Bun runtime only — built-in, no install needed
@@ -57,15 +58,6 @@ async function trySqlJs() {
 async function initAdapter() {
   ensureDirs();
 
-  // Restore from Turso if local DB doesn't exist
-  if (isTursoConfigured() && !fs.existsSync(DATA_FILE)) {
-    console.log("[DB] local DB not found, attempting restore from Turso...");
-    try {
-      await restoreFromTurso(DATA_FILE);
-    } catch (e) {
-      console.warn(`[DB] Turso restore failed: ${e.message}`);
-    }
-  }
   // Order per runtime:
   //   Bun:  bun:sqlite → sql.js
   //   Node: better-sqlite3 → node:sqlite (≥22.5) → sql.js
@@ -82,6 +74,16 @@ async function initAdapter() {
 
   const { runMigrationOnce } = await import("./migrate.js");
   await runMigrationOnce(adapter);
+
+  if (needsTursoRestore) {
+    console.log("[DB] local DB was empty, restoring from Turso...");
+    try {
+      await restoreFromTurso(adapter);
+    } catch (e) {
+      console.warn(`[DB] Turso restore failed: ${e.message}`);
+    }
+  }
+
   return adapter;
 }
 
