@@ -18,6 +18,7 @@
     "@dnd-kit/modifiers": "^9.0.0",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@libsql/client": "^0.17.4",
     "@monaco-editor/react": "^4.7.0",
     "@next/third-parties": "^16.2.9",
     "@xyflow/react": "^12.10.1",

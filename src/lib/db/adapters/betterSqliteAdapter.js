@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { PRAGMA_SQL } from "../schema.js";
+import { syncWrite, syncExec, isTursoConfigured } from "../sync/tursoSync.js";
 
 // Periodic checkpoint to keep WAL file small (avoid huge -wal/-shm growth)
 const CHECKPOINT_INTERVAL_MS = 60 * 1000;
@@ -38,12 +39,22 @@ export function createBetterSqliteAdapter(filePath) {
   process.once("SIGINT", () => { onShutdown(); process.exit(0); });
   process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
 
+  const hasTurso = isTursoConfigured();
+
   return {
-    driver: "better-sqlite3",
-    run(sql, params = []) { return prepare(sql).run(params); },
+    driver: hasTurso ? "better-sqlite3 + turso" : "better-sqlite3",
+    run(sql, params = []) {
+      const result = prepare(sql).run(params);
+      if (hasTurso) syncWrite(sql, params);
+      return result;
+    },
     get(sql, params = []) { return prepare(sql).get(params); },
     all(sql, params = []) { return prepare(sql).all(params); },
-    exec(sql) { return db.exec(sql); },
+    exec(sql) {
+      const result = db.exec(sql);
+      if (hasTurso) syncExec(sql);
+      return result;
+    },
     transaction(fn) { return db.transaction(fn)(); },
     checkpoint() { try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {} },
     close() {
