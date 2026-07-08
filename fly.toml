@@ -1,5 +1,5 @@
 app = "9router-deploy"
-primary_region = "sin"
+primary_region = "ams"
 
 [build]
 
