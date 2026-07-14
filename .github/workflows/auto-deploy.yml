@@ -1,0 +1,62 @@
+name: Auto Deploy 9Router
+
+on:
+  schedule:
+    # Every day at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check version
+        id: version
+        run: |
+          LATEST=$(npm view 9router version 2>/dev/null)
+          CURRENT=$(node -p "require('./package.json').version")
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Latest: $LATEST | Current: $CURRENT"
+
+      - name: Sync from upstream
+        if: steps.version.outputs.latest != steps.version.outputs.current
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/decolua/9router.git 2>/dev/null || true
+          git fetch upstream main
+
+          git merge upstream/main --no-edit -X ours || {
+            echo "Conflicts, resolving with upstream..."
+            git add -A
+            git commit -m "chore: sync with upstream (resolve conflicts)"
+          }
+
+      - name: Install flyctl
+        if: steps.version.outputs.latest != steps.version.outputs.current
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to Fly.io
+        if: steps.version.outputs.latest != steps.version.outputs.current
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy --app 9router-deploy --remote-only
+          echo "Deployed v${{ steps.version.outputs.latest }}"
+
+      - name: Push
+        if: steps.version.outputs.latest != steps.version.outputs.current
+        run: |
+          git push origin HEAD:master
