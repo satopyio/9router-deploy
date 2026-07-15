@@ -36,9 +36,9 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git remote add upstream https://github.com/decolua/9router.git 2>/dev/null || true
-          git fetch upstream main
+          git fetch upstream master
 
-          git merge upstream/main --no-edit -X ours || {
+          git merge upstream/master --no-edit --allow-unrelated-histories -X ours || {
             echo "Conflicts, resolving with upstream..."
             git add -A
             git commit -m "chore: sync with upstream (resolve conflicts)"
